@@ -25,26 +25,26 @@ def no_interfere_ctx(ctx):
         yield
     finally:
         for obj in ctx.selected_objects:
-            obj.select = False
+            obj.select_set(False)
 
         for obj in old_selected_objects:
             if bad_object(obj):
                 continue
 
             if obj.name in bpy.data.objects:
-                obj.select = True
+                obj.select_set(True)
 
         if (
                 active_object 
                 and not bad_object(active_object)
                 and active_object.name in bpy.data.objects):
 
-            ctx.scene.objects.active = active_object
+            ctx.view_layer.objects.active = active_object
     
 
 def deselect(ctx):
     for obj in ctx.selected_objects:
-        obj.select = False
+        obj.select_set(False)
 
 
 @contextmanager
@@ -53,7 +53,7 @@ def selected(ctx, obs):
     with no_interfere_ctx(ctx):
         deselect(ctx)
         for ob in obs:
-            ob.select = True
+            ob.select_set(True)
         yield
 
 
@@ -86,7 +86,7 @@ def visible(obs):
 
 @contextmanager
 def active(ob):
-    obs = bpy.context.scene.objects
+    obs = bpy.context.view_layer.objects
 
     old_active = obs.active
     obs.active = ob
@@ -108,10 +108,10 @@ def duplicate(scene, ob):
 
     # some ops will fail (like triangle mesh) if the object we're operating on
     # is hidden.  i think its safe to unhide it
-    copy.hide = False
+    copy.hide_set(False)
 
     copy.data = ob.data.copy()
-    scene.objects.link(copy)
+    bpy.context.collection.objects.link(copy)
     return copy
 
 
@@ -123,6 +123,6 @@ def a_copy(ctx, scene, ob):
     try:
         yield copy
     finally:
-        scene.objects.unlink(copy)
+        bpy.context.collection.objects.unlink(copy)
 
 

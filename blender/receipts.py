@@ -17,7 +17,6 @@ from bpy_extras.object_utils import world_to_camera_view
 from mathutils import Vector
 
 
-
 THIS_DIR = bpy.path.abspath("//")
 if THIS_DIR not in sys.path:
     sys.path.insert(0, THIS_DIR)
@@ -29,8 +28,8 @@ import utils
 C = bpy.context
 D = bpy.data
 
-TABLE_DIR = "//tables"
-FONT_DIR = "//fonts/ttfs"
+TABLE_DIR = "/blender/tables"
+FONT_DIR = "/blender/fonts/ttfs"
 FLASH_BRIGHTNESS = 1000
 
 
@@ -62,13 +61,13 @@ def z_to_floor(ob):
     """ takes an object and gives a z position that puts its bounding box at 0
     """ 
     bb = ob.bound_box
-    lower_pos = (ob.matrix_world * Vector(bb[0])).z
+    lower_pos = (ob.matrix_world @ Vector(bb[0])).z
     diff = ob.matrix_world.translation.z - lower_pos
     return diff
 
 def load_image(path):
     """ load a texture """
-    im = D.images.load(path, True)
+    im = D.images.load(path, check_existing=True)
     return im
 
 def load_table(name):
@@ -100,7 +99,8 @@ def shuffle():
     
     # we must call scene update so we have correct bounding box values from
     # displacement and wrinkles, in order to align the receipt to the table
-    C.scene.update()
+    #C.scene.update()
+    C.view_layer.update()
 
     # align receipt to floor
     receipt_handle.location.z = z_to_floor(receipt)
@@ -165,7 +165,8 @@ def get_unmodified_size(ob):
     restore_fns = [flip_off(mod) for mod in ob.modifiers]
 
     try:
-        scene.update()
+        #scene.update()
+        C.view_layer.update()
         dims = ob.dimensions
     finally:
         [restore() for restore in restore_fns]
@@ -187,13 +188,13 @@ def to_mesh(ctx, scene, ob):
             # meshes.  typically, you'd do it one at a time, but this is slow.
             # adding one triangulate modifier, then linking to all applicable
             # meshes, is the fastest
-            copy.select = True
-            ctx.scene.objects.active = copy
+            copy.select_set(True)
+            ctx.view_layer.objects.active = copy
             bpy.ops.object.modifier_add(type="TRIANGULATE")
             bpy.ops.object.make_links_data(type="MODIFIERS")
 
-            mesh = copy.to_mesh(scene, True, "PREVIEW")
-            mesh.update(calc_tessface=True)
+            mesh = copy.to_mesh() # todo preserve_all_data_layers=True, depsgraph="PREVIEW"
+            mesh.update(calc_edges=True, calc_edges_loose=True)
             return mesh
 
 
@@ -320,97 +321,23 @@ def set_receipt_image(receipt_mat, filename):
 def random_float(start, end):
     return (random.random() * (end - start)) + start
 
-
-def generate_bbs(render_size):
-    font_dir = bpy.path.abspath(FONT_DIR)
-
-    line_spacing = random_float(0.9, 1.1)
-    kerning = random_float(0.95, 1.05)
-    receipt_file, letter_bbs, font_used = generate_receipt_texture(receipt,
-            render_size[0], font_dir, line_spacing, kerning)
-
-    receipt_name = receipt_file.name
-
-    set_receipt_image(receipt_mat, receipt_name)
-
+def receipt_texture_on_mesh():
     shuffle()
-    mesh = to_mesh(C, C.scene, receipt)
+    receipt_image_filename = join("//blender", "receipts",  "receipt4.png")
+    img = load_image(receipt_image_filename)
+    mat = bpy.data.materials.new(name="receipt_material")
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes["Principled BSDF"]
+    texImage = mat.node_tree.nodes.new('ShaderNodeTexImage')
+    texImage.image = img
+    mat.node_tree.links.new(bsdf.inputs['Base Color'], texImage.outputs['Color'])
 
+    if receipt.data.materials:
+      receipt.data.materials[0] = mat
+    else:
+      receipt.data.materials.append(mat)
 
-    # do some preprocessing and create some data structures that will aid in our
-    # get_containing_face function
-    vert_to_coords = {}
-    vert_to_faces = dd(list)
-    verts_and_coords = []
-    uv_map = mesh.tessface_uv_textures[0]
-    for faceidx, face in enumerate(uv_map.data):
-        verts = mesh.tessfaces[faceidx].vertices
-        for vidx, uv_data in zip(verts, face.uv):
-            vert = mesh.vertices[vidx]
-            coord = Vector((uv_data[0], uv_data[1]))
-            vert_to_coords[vidx] = coord
-
-            verts_and_coords.append((vidx, coord))
-            vert_to_faces[vidx].append(faceidx)
-    data = [(coord.x, coord.y) for _, coord in verts_and_coords]
-    kdtree = KDTree(data)
-
-    # loop through our letters and bounding boxes and put the bounding box into
-    # image space
-    image_bbs = []
-    for letter, bbs in letter_bbs.items():
-        for top_left, bottom_right in bbs:
-
-            # these are the four corners of a glyph.  these are in texture-space
-            # and we want their coordinates in rendered-image space
-            top_left = Vector((top_left[0], top_left[1]))
-            top_right = Vector((bottom_right[0], top_left[1]))
-            bottom_right = Vector((bottom_right[0], bottom_right[1]))
-            bottom_left = Vector((top_left[0], bottom_right[1]))
-            # we want our winding order to be counter clockwise
-            coords = [top_left, top_right, bottom_right, bottom_left]
-
-            # for each corner, map it to distorted image space
-            raw_bbs = []
-            for coord in coords:
-                img_pos = map_coord(scene, camera, receipt.matrix_world, coord,
-                        mesh, vert_to_coords, vert_to_faces, verts_and_coords,
-                        kdtree)
-                img_pos = (img_pos.x, img_pos.y)
-                raw_bbs.append(img_pos)
-
-            # now that we have all the corners in image space, find the bounding
-            # box that contains those warped corners, and we'll use that
-            ul, br = bounding_box_for_points(raw_bbs)
-
-            # convert our texture-space coordinates (0,0 in bottom right) to
-            # image-space (0,0 in upper left)
-            ul = norm_img_to_render_space(render_size, ul)
-            br = norm_img_to_render_space(render_size, br)
-            ul, br = (list(ul), list(br))
-
-
-            width = abs(ul[0] - br[0])
-            height = abs(ul[1] - br[1])
-            ratio = width / height
-
-            if ratio > 3 or ratio < 1/15.0:
-                continue
-
-            raw_bbs = [norm_img_to_render_space(render_size, bb) for bb in
-                    raw_bbs]
-
-            tl, tr, br, bl = raw_bbs
-            upper = vec_sub(tr, tl)
-            lower = vec_sub(br, bl)
-            avg_vec = vec_add(upper, lower)
-            norm_vec = vec_normalize(avg_vec)
-
-            data = (letter, (ul, br), (width, height), raw_bbs, norm_vec)
-            image_bbs.append(data)
-
-    return image_bbs, receipt_name
-
+    return (0,0), receipt_image_filename
 
 def render(size):
     width, height = size
@@ -419,13 +346,13 @@ def render(size):
     rs.resolution_x = width
     rs.resolution_y = height
 
-    image_bbs, texture_file = generate_bbs(size)
+    image_bbs, texture_file = receipt_texture_on_mesh()
 
     output_path = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
     rs.filepath = output_path
 
     bpy.ops.render.render(write_still=True)
-    im = Image.open(rs.filepath).convert("L")
+    im = Image.open(rs.filepath).convert("RGB")
 
     os.unlink(texture_file)
     os.unlink(output_path)

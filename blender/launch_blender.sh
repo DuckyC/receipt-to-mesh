@@ -1,6 +1,5 @@
 #!/bin/bash
-blender/blender -b\
-    -noaudio\
+blender -b -noaudio\
     receipt.blend\
     -P receipts.py\
     -- $@
